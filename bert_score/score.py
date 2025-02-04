@@ -188,6 +188,68 @@ def score(
 
     return out
 
+def get_bert_embeddings(model, sentences, tokenizer, device, batch_size):
+    """
+    문장들의 BERT 임베딩 벡터를 추출하는 함수
+    """
+    model.eval()
+    embeddings = []
+    with torch.no_grad():
+        for i in range(0, len(sentences), batch_size):
+            batch = sentences[i : i + batch_size]
+            inputs = tokenizer(batch, padding=True, truncation=True, return_tensors="pt").to(device)
+            outputs = model(**inputs)
+            embeddings.append(outputs.last_hidden_state[:, 0, :])  # CLS 토큰의 임베딩 사용
+
+    return torch.cat(embeddings, dim=0)
+
+
+def score_with_vectors(
+    cands,
+    refs,
+    model_type=None,
+    num_layers=None,
+    verbose=False,
+    idf=False,
+    device=None,
+    batch_size=64,
+    nthreads=4,
+    all_layers=False,
+    lang=None,
+    return_hash=False,
+    rescale_with_baseline=False,
+    baseline_path=None,
+    use_fast_tokenizer=False,
+):
+    assert len(cands) == len(refs), "Different number of candidates and references"
+    assert lang is not None or model_type is not None, "Either lang or model_type should be specified"
+
+    if model_type is None:
+        model_type = lang2model[lang.lower()]
+    if num_layers is None:
+        num_layers = model2layers[model_type]
+
+    tokenizer = get_tokenizer(model_type, use_fast_tokenizer)
+    model = get_model(model_type, num_layers, all_layers)
+    
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+    idf_dict = defaultdict(lambda: 1.0) if not idf else get_idf_dict(refs, tokenizer, nthreads=nthreads)
+
+    # BERT 임베딩 벡터 계산
+    refs_embeddings = get_bert_embeddings(model, refs, tokenizer, device, batch_size)
+    cands_embeddings = get_bert_embeddings(model, cands, tokenizer, device, batch_size)
+
+    # BERTScore 계산
+    all_preds = bert_cos_score_idf(
+        model, refs, cands, tokenizer, idf_dict, verbose=verbose, device=device, batch_size=batch_size, all_layers=all_layers
+    ).cpu()
+
+    out = all_preds[..., 0], all_preds[..., 1], all_preds[..., 2]  # P, R, F
+
+    return out, refs_embeddings, cands_embeddings
 
 def plot_example(
     candidate,
